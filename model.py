@@ -181,13 +181,32 @@ class BaselineReader(nn.Module):
 
         rnn_cell = nn.LSTM if args.rnn_cell_type == 'lstm' else nn.GRU
 
-        # Initialize parts of speech embedding layer (2.5)
+        # Initialize parts of speech and NER embedding layers (2.5)
         self.max_pos = 256
         self.pos_embedding = nn.Embedding(self.max_pos, args.embedding_dim)
+        self.max_net = 256
+        self.net_embedding = nn.Embedding(self.max_net, args.embedding_dim)
+        self.max_dep = 256
+        self.dep_embedding = nn.Embedding(self.max_dep, args.embedding_dim)
+
+        passage_rnn_input_size  = args.embedding_dim * 2
+        question_rnn_input_size = args.embedding_dim
+
+        if self.args.use_pos:
+            passage_rnn_input_size  += args.embedding_dim
+            question_rnn_input_size += args.embedding_dim
+
+        if self.args.use_netype:
+            passage_rnn_input_size  += args.embedding_dim
+            question_rnn_input_size += args.embedding_dim
+
+        if self.args.use_dep:
+            passage_rnn_input_size  += args.embedding_dim
+            question_rnn_input_size += args.embedding_dim
 
         # Initialize passage encoder (3)
         self.passage_rnn = rnn_cell(
-            args.embedding_dim * 3,
+            passage_rnn_input_size,
             args.hidden_dim,
             bidirectional=args.bidirectional,
             batch_first=True,
@@ -195,7 +214,7 @@ class BaselineReader(nn.Module):
 
         # Initialize question encoder (4)
         self.question_rnn = rnn_cell(
-            args.embedding_dim * 2,
+            question_rnn_input_size,
             args.hidden_dim,
             bidirectional=args.bidirectional,
             batch_first=True,
@@ -299,19 +318,46 @@ class BaselineReader(nn.Module):
             torch.cat((passage_embeddings, aligned_embeddings), 2),
         )  # [batch_size, p_len, p_dim + q_dim]
 
-        # 2.5) Embed the parts of speech and concatenate with 
-        #      passage and question embeddings.
-        ppos_embeddings = self.pos_embedding(batch['ppos'])  # [batch_size, p_len, p_dim]
-        qpos_embeddings = self.pos_embedding(batch['qpos'])  # [batch_size, q_len, q_dim]
+        # 2.5) Embed the parts of speech and named entity types 
+        #      and concatenate with passage and question embeddings.
+        if self.args.use_pos:
+            ppos_embeddings = self.pos_embedding(batch['ppos'])  # [batch_size, p_len, p_dim]
+            qpos_embeddings = self.pos_embedding(batch['qpos'])  # [batch_size, q_len, q_dim]
 
-        passage_embeddings = cuda(
-            self.args,
-            torch.cat((passage_embeddings, ppos_embeddings), 2),
-        )  # [batch_size, p_len, p_dim + q_dim + p_dim]
-        question_embeddings = cuda(
-            self.args,
-            torch.cat((question_embeddings, qpos_embeddings), 2),
-        )  # [batch_size, q_len, q_dim + q_dim]
+            passage_embeddings = cuda(
+                self.args,
+                torch.cat((passage_embeddings, ppos_embeddings), 2),
+            )
+            question_embeddings = cuda(
+                self.args,
+                torch.cat((question_embeddings, qpos_embeddings), 2),
+            )
+
+        if self.args.use_netype:
+            pnet_embeddings = self.net_embedding(batch['pnet'])  # [batch_size, p_len, p_dim]
+            qnet_embeddings = self.net_embedding(batch['qnet'])  # [batch_size, q_len, q_dim]
+
+            passage_embeddings = cuda(
+                self.args,
+                torch.cat((passage_embeddings, pnet_embeddings), 2),
+            )
+            question_embeddings = cuda(
+                self.args,
+                torch.cat((question_embeddings, qnet_embeddings), 2),
+            )
+
+        if self.args.use_dep:
+            pdep_embeddings = self.dep_embedding(batch['pdep'])  # [batch_size, p_len, p_dim]
+            qdep_embeddings = self.dep_embedding(batch['qdep'])  # [batch_size, q_len, q_dim]
+
+            passage_embeddings = cuda(
+                self.args,
+                torch.cat((passage_embeddings, pdep_embeddings), 2),
+            )
+            question_embeddings = cuda(
+                self.args,
+                torch.cat((question_embeddings, qdep_embeddings), 2),
+            )
 
         # 3) Passage Encoder
         passage_hidden = self.sorted_rnn(

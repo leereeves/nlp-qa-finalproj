@@ -201,14 +201,21 @@ parser.add_argument(
     help='use parts of speech',
 )
 parser.add_argument(
-    '--use_ner_type',
+    '--use_netype',
     action='store_true',
     help='use named entity type',
 )
 parser.add_argument(
-    '--use_ner_id',
+    '--use_dep',
     action='store_true',
-    help='use named entity knowledgebase id',
+    help='use syntactic dependency relation',
+)
+
+# Debugging options
+parser.add_argument(
+    '--mini',
+    action='store_true',
+    help='use minimum data, for debugging',
 )
 
 def _print_arguments(args):

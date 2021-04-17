@@ -55,7 +55,8 @@ class Vocabulary:
             (at position 0) and `UNK_TOKEN` (at position 1) are prepended.
         """
         vocab = collections.defaultdict(int)
-        for (_, passage, question, _, _, _, _) in samples:
+        for sample in samples:
+            (_, passage, question) = sample[:3]
             for token in itertools.chain(passage, question):
                 vocab[token.lower()] += 1
         top_words = [
@@ -141,6 +142,10 @@ class QADataset(Dataset):
     def __init__(self, args, path):
         self.args = args
         self.nlp = spacy.load("en_core_web_sm")
+        self.net_to_index_dict = dict()
+        self.net_to_index_dict[0] = 1
+        self.dep_to_index_dict = dict()
+        self.dep_to_index_dict[0] = 1
         self.meta, self.elems = load_dataset(path)
         self.samples = self._create_samples()
         self.tokenizer = None
@@ -148,7 +153,17 @@ class QADataset(Dataset):
         self.pad_token_id = self.tokenizer.pad_token_id \
             if self.tokenizer is not None else 0
 
-    def get_pos(self, text, data_tokens):
+    def net_to_index(self, id):
+        if id not in self.net_to_index_dict:
+            self.net_to_index_dict[id] = len(self.net_to_index_dict) + 1
+        return self.net_to_index_dict[id]
+
+    def dep_to_index(self, id):
+        if id not in self.dep_to_index_dict:
+            self.dep_to_index_dict[id] = len(self.dep_to_index_dict) + 1
+        return self.dep_to_index_dict[id]
+
+    def get_spacy_tags(self, text, data_tokens):
         spacy_doc = self.nlp(text)
         spacy_tokens = [token for token in spacy_doc]
         spacy_offsets = [token.idx for token in spacy_tokens]
@@ -157,7 +172,15 @@ class QADataset(Dataset):
             spacy_tokens[off_to_ind[offset]].pos if offset in off_to_ind else 0
             for (token, offset) in data_tokens
         ][:self.args.max_context_length]
-        return pos
+        net = [
+            self.net_to_index(spacy_tokens[off_to_ind[offset]].ent_type) if offset in off_to_ind else 0
+            for (token, offset) in data_tokens
+        ][:self.args.max_context_length]
+        dep = [
+            self.dep_to_index(spacy_tokens[off_to_ind[offset]].dep) if offset in off_to_ind else 0
+            for (token, offset) in data_tokens
+        ][:self.args.max_context_length]
+        return pos, net, dep
 
     def _create_samples(self):
         """
@@ -175,7 +198,7 @@ class QADataset(Dataset):
             ][:self.args.max_context_length]
 
             # Get parts of speech from Spacy
-            ppos = self.get_pos(elem['context'], elem['context_tokens'])
+            ppos, pnet, pdep = self.get_spacy_tags(elem['context'], elem['context_tokens'])
             assert len(ppos) == len(passage)
 
             # Each passage has several questions associated with it.
@@ -185,7 +208,7 @@ class QADataset(Dataset):
                 question = [
                     token.lower() for (token, offset) in qa['question_tokens']
                 ][:self.args.max_question_length]
-                qpos = self.get_pos(qa['question'], qa['question_tokens'])
+                qpos, qnet, qdep = self.get_spacy_tags(qa['question'], qa['question_tokens'])
                 assert len(qpos) == len(question)
 
                 # Select the first answer span, which is formatted as
@@ -194,8 +217,10 @@ class QADataset(Dataset):
                 answers = qa['detected_answers']
                 answer_start, answer_end = answers[0]['token_spans'][0]
                 samples.append(
-                    (qid, passage, question, ppos, qpos, answer_start, answer_end)
+                    (qid, passage, question, ppos, qpos, pnet, qnet, pdep, qdep, answer_start, answer_end)
                 )
+            if self.args.mini and len(samples) > 100:
+                break
                 
         return samples
 
@@ -222,11 +247,15 @@ class QADataset(Dataset):
         questions = []
         passages_pos = []
         questions_pos = []
+        passages_net = []
+        questions_net = []
+        passages_dep = []
+        questions_dep = []
         start_positions = []
         end_positions = []
         for idx in example_idxs:
             # Unpack QA sample and tokenize passage/question.
-            qid, passage, question, ppos, qpos, answer_start, answer_end = self.samples[idx]
+            qid, passage, question, ppos, qpos, pnet, qnet, pdep, qdep, answer_start, answer_end = self.samples[idx]
 
             # Convert words to tensor.
             passage_ids = torch.tensor(
@@ -238,6 +267,10 @@ class QADataset(Dataset):
             # Convert ints to tensor.
             ppos_ids = torch.tensor(ppos)
             qpos_ids = torch.tensor(qpos)
+            pnet_ids = torch.tensor(pnet)
+            qnet_ids = torch.tensor(qnet)
+            pdep_ids = torch.tensor(pdep)
+            qdep_ids = torch.tensor(qdep)
             answer_start_ids = torch.tensor(answer_start)
             answer_end_ids = torch.tensor(answer_end)
 
@@ -246,10 +279,18 @@ class QADataset(Dataset):
             questions.append(question_ids)
             passages_pos.append(ppos_ids)
             questions_pos.append(qpos_ids)
+            passages_net.append(pnet_ids)
+            questions_net.append(qnet_ids)
+            passages_dep.append(pdep_ids)
+            questions_dep.append(qdep_ids)
             start_positions.append(answer_start_ids)
             end_positions.append(answer_end_ids)
 
-        return zip(passages, questions, passages_pos, questions_pos, start_positions, end_positions)
+        return zip( passages, questions, 
+                    passages_pos, questions_pos, 
+                    passages_net, questions_net, 
+                    passages_dep, questions_dep, 
+                    start_positions, end_positions)
 
     def _create_batches(self, generator, batch_size):
         """
@@ -284,6 +325,10 @@ class QADataset(Dataset):
             questions = []
             ppos = []
             qpos = []
+            pnet = []
+            qnet = []
+            pdep = []
+            qdep = []
             start_positions = torch.zeros(bsz)
             end_positions = torch.zeros(bsz)
             max_passage_length = 0
@@ -294,8 +339,12 @@ class QADataset(Dataset):
                 questions.append(current_batch[ii][1])
                 ppos.append(current_batch[ii][2])
                 qpos.append(current_batch[ii][3])
-                start_positions[ii] = current_batch[ii][4]
-                end_positions[ii] = current_batch[ii][5]
+                pnet.append(current_batch[ii][4])
+                qnet.append(current_batch[ii][5])
+                pdep.append(current_batch[ii][6])
+                qdep.append(current_batch[ii][7])
+                start_positions[ii] = current_batch[ii][8]
+                end_positions[ii] = current_batch[ii][9]
                 max_passage_length = max(
                     max_passage_length, len(current_batch[ii][0])
                 )
@@ -303,22 +352,21 @@ class QADataset(Dataset):
                     max_question_length, len(current_batch[ii][1])
                 )
 
+            def pad_pq(ps, qs):
+                padded_ps = torch.zeros(bsz, max_passage_length)
+                padded_qs = torch.zeros(bsz, max_question_length)
+                for iii, pq in enumerate(zip(ps, qs)):
+                    pi, qi = pq
+                    padded_ps[iii][:len(pi)] = pi
+                    padded_qs[iii][:len(qi)] = qi
+                return padded_ps, padded_qs
+
             # Assume pad token index is 0. Need to change here if pad token
             # index is other than 0.
-            padded_passages = torch.zeros(bsz, max_passage_length)
-            padded_questions = torch.zeros(bsz, max_question_length)
-            padded_ppos = torch.zeros(bsz, max_passage_length)
-            padded_qpos = torch.zeros(bsz, max_question_length)
-            # Pad passages and questions
-            for iii, passage_question in enumerate(zip(passages, questions)):
-                passage, question = passage_question
-                padded_passages[iii][:len(passage)] = passage
-                padded_questions[iii][:len(question)] = question
-            # Pad parts of speech
-            for iii, passage_question in enumerate(zip(ppos, qpos)):
-                ppos, qpos = passage_question
-                padded_ppos[iii][:len(ppos)] = ppos
-                padded_qpos[iii][:len(qpos)] = qpos
+            padded_passages, padded_questions = pad_pq(passages, questions)
+            padded_ppos, padded_qpos = pad_pq(ppos, qpos)
+            padded_pnet, padded_qnet = pad_pq(pnet, qnet)
+            padded_pdep, padded_qdep = pad_pq(pdep, qdep)
 
             # Create an input dictionary
             batch_dict = {
@@ -326,6 +374,10 @@ class QADataset(Dataset):
                 'questions': cuda(self.args, padded_questions).long(),
                 'ppos': cuda(self.args, padded_ppos).long(),
                 'qpos': cuda(self.args, padded_qpos).long(),
+                'pnet': cuda(self.args, padded_pnet).long(),
+                'qnet': cuda(self.args, padded_qnet).long(),
+                'pdep': cuda(self.args, padded_pdep).long(),
+                'qdep': cuda(self.args, padded_qdep).long(),
                 'start_positions': cuda(self.args, start_positions).long(),
                 'end_positions': cuda(self.args, end_positions).long()
             }
