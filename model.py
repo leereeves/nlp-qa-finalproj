@@ -181,9 +181,13 @@ class BaselineReader(nn.Module):
 
         rnn_cell = nn.LSTM if args.rnn_cell_type == 'lstm' else nn.GRU
 
+        # Initialize parts of speech embedding layer (2.5)
+        self.max_pos = 256
+        self.pos_embedding = nn.Embedding(self.max_pos, args.embedding_dim)
+
         # Initialize passage encoder (3)
         self.passage_rnn = rnn_cell(
-            args.embedding_dim * 2,
+            args.embedding_dim * 3,
             args.hidden_dim,
             bidirectional=args.bidirectional,
             batch_first=True,
@@ -191,7 +195,7 @@ class BaselineReader(nn.Module):
 
         # Initialize question encoder (4)
         self.question_rnn = rnn_cell(
-            args.embedding_dim,
+            args.embedding_dim * 2,
             args.hidden_dim,
             bidirectional=args.bidirectional,
             batch_first=True,
@@ -294,6 +298,20 @@ class BaselineReader(nn.Module):
             self.args,
             torch.cat((passage_embeddings, aligned_embeddings), 2),
         )  # [batch_size, p_len, p_dim + q_dim]
+
+        # 2.5) Embed the parts of speech and concatenate with 
+        #      passage and question embeddings.
+        ppos_embeddings = self.pos_embedding(batch['ppos'])  # [batch_size, p_len, p_dim]
+        qpos_embeddings = self.pos_embedding(batch['qpos'])  # [batch_size, q_len, q_dim]
+
+        passage_embeddings = cuda(
+            self.args,
+            torch.cat((passage_embeddings, ppos_embeddings), 2),
+        )  # [batch_size, p_len, p_dim + q_dim + p_dim]
+        question_embeddings = cuda(
+            self.args,
+            torch.cat((question_embeddings, qpos_embeddings), 2),
+        )  # [batch_size, q_len, q_dim + q_dim]
 
         # 3) Passage Encoder
         passage_hidden = self.sorted_rnn(

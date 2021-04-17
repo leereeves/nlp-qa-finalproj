@@ -194,6 +194,22 @@ parser.add_argument(
     help='dropout on passage and question vectors',
 )
 
+# Additional arguments for Spacy data
+parser.add_argument(
+    '--use_pos',
+    action='store_true',
+    help='use parts of speech',
+)
+parser.add_argument(
+    '--use_ner_type',
+    action='store_true',
+    help='use named entity type',
+)
+parser.add_argument(
+    '--use_ner_id',
+    action='store_true',
+    help='use named entity knowledgebase id',
+)
 
 def _print_arguments(args):
     """Pretty prints command line args to stdout.
@@ -421,7 +437,8 @@ def write_predictions(args, model, dataset):
             for j in range(start_logits.size(0)):
                 # Find question index and passage.
                 sample_index = args.batch_size * i + j
-                qid, passage, _, _, _ = dataset.samples[sample_index]
+                qid = dataset.samples[sample_index][0]
+                passage = dataset.samples[sample_index][1]
 
                 # Unpack start and end probabilities. Find the constrained
                 # (start, end) pair that has the highest joint probability.
